@@ -1,0 +1,87 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    env_file:
+      - ./env/postgres.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Airflow
+  airflow:
+    image: apache/airflow:2.8.3
+    container_name: airflow
+    depends_on:
+      - postgres
+    env_file:
+      - ./env/postgres.env
+      - ./env/airflow.env
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      # AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    volumes:
+      - ./services/airflow/dags:/opt/airflow/dags
+      - ./services/airflow/airflow.cfg:/opt/airflow/airflow.cfg
+      - ./services/ingest:/opt/airflow/ingest
+      - ./services/transform:/opt/airflow/transform
+
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "airflow db init &&
+               airflow users create --username ${AIRFLOW_ADMIN_USERNAME} --firstname \"${AIRFLOW_ADMIN_FIRSTNAME}\" --lastname \"${AIRFLOW_ADMIN_LASTNAME}\" --role ${AIRFLOW_ADMIN_ROLE} --email ${AIRFLOW_ADMIN_EMAIL} --password \"${AIRFLOW_ADMIN_PASSWORD}\" &&
+               airflow scheduler & airflow webserver"
+    restart: unless-stopped
+
+  ingest:
+    build:
+      context: ./services/ingest
+    container_name: ingest
+    depends_on:
+      - postgres
+    env_file:
+      - ./env/postgres.env
+    environment:
+      POSTGRES_HOST: postgres
+      RAW_DATA: /data/raw
+      INGESTED_DATA: /data/ingested
+    volumes:
+      - ./data:/data
+    command: ["python", "ingest.py"]
+
+  transform:
+    build:
+      context: ./services/transform
+    container_name: transform
+    depends_on:
+      - postgres
+      - ingest
+    env_file:
+      - ./env/postgres.env
+    environment:
+      POSTGRES_HOST: postgres
+      DUCKDB_PATH: /data/reporting.duckdb
+    volumes:
+      - ./data:/data
+    command: ["python", "transform.py"]
+
+  streamlit:
+    build:
+      context: ./services/streamlit
+    container_name: streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./services/streamlit:/app
+      - ./data:/data  # access CSVs or DuckDB
+    environment:
+      - DUCKDB_PATH=/data/reporting.duckdb
+    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+volumes:
+  postgres_data:
